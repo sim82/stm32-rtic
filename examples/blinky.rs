@@ -5,15 +5,21 @@ extern crate panic_halt;
 
 extern crate stm32l4xx_hal as hal;
 use rtic_stm32::prelude::*;
+use smart_leds::RGB8;
+use ws2812::Ws2812;
 
 use core::fmt::Write;
 use embedded_graphics::{fonts, pixelcolor, prelude::*, style};
 use hal::{
     device::I2C1,
     gpio::gpioa::PA0,
-    gpio::{Alternate, Edge, Input, OpenDrain, Output, PullUp, PushPull, PA5, PB8, PB9},
+    gpio::{
+        Alternate, Edge, Floating, Input, OpenDrain, Output, PullUp, PushPull, PA1, PA5, PA6, PA7,
+        PB8, PB9,
+    },
     i2c::I2c,
     prelude::*,
+    spi::Spi,
     stm32,
     timer::{Event, Timer},
 };
@@ -23,7 +29,9 @@ use hal::{
 };
 use heapless::consts::*;
 use rtic::cyccnt::U32Ext;
+use smart_leds::SmartLedsWrite;
 use ssd1306::{mode::GraphicsMode, prelude::*, Builder, I2CDIBuilder};
+use ws2812_spi as ws2812;
 
 const GAMMA8: [u8; 256] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
@@ -40,11 +48,12 @@ const GAMMA8: [u8; 256] = [
 ];
 
 const REFRESH_DISPLAY_PERIOD: u32 = 8_000_000 / 4;
+const REFRESH_LED_STRIP_PERIOD: u32 = 8_000_000 / 9;
 
 #[rtic::app(device = hal::stm32, peripherals = true, monotonic = rtic::cyccnt::CYCCNT)]
 const APP: () = {
     struct Resources {
-        led: PA5<Output<PushPull>>,
+        led: PA1<Output<PushPull>>,
         pwm: hal::pwm::Pwm<hal::pac::TIM2, hal::pwm::C1>,
         button: PC13<Input<PullUp>>,
         timer: Timer<stm32::TIM7>,
@@ -65,26 +74,41 @@ const APP: () = {
             >,
             DisplaySize128x64,
         >,
+        led_strip_dev: ws2812_spi::Ws2812<
+            Spi<
+                hal::pac::SPI1,
+                (
+                    PA5<Alternate<hal::gpio::AF5, Input<Floating>>>,
+                    PA6<Alternate<hal::gpio::AF5, Input<Floating>>>,
+                    PA7<Alternate<hal::gpio::AF5, Input<Floating>>>,
+                ),
+            >,
+        >,
+        rainbow: [Rainbow; 8],
+        // led_strip_data: [smart_leds::RGB8; 8],
     }
 
-    #[init(schedule = [refresh_display])]
+    #[init(schedule = [refresh_display, refresh_led_strip])]
     fn init(mut cx: init::Context) -> init::LateResources {
         let mut rcc = cx.device.RCC.constrain();
         let mut flash = cx.device.FLASH.constrain();
         let mut pwr = cx.device.PWR.constrain(&mut rcc.apb1r1);
         let clocks = rcc
             .cfgr
-            // .sysclk(64.mhz())
-            // .pclk1(16.mhz())
-            // .pclk2(64.mhz())
+            .sysclk(64.mhz())
+            .pclk1(16.mhz())
+            .pclk2(64.mhz())
             .freeze(&mut flash.acr, &mut pwr);
 
-        // Set up LED
+        // ================================================================================
+        // Set up LED1
         let mut gpioa = cx.device.GPIOA.split(&mut rcc.ahb2);
         let led = gpioa
-            .pa5
+            .pa1
             .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
 
+        // ================================================================================
+        // Set up LED2 on PA0 with pwm
         let led2 = gpioa
             .pa0
             .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper)
@@ -97,6 +121,8 @@ const APP: () = {
 
         pwm.enable();
 
+        // ================================================================================
+        // Set up button
         let mut gpioc = cx.device.GPIOC.split(&mut rcc.ahb2);
         let mut button = gpioc
             .pc13
@@ -104,10 +130,13 @@ const APP: () = {
         button.make_interrupt_source(&mut cx.device.SYSCFG, &mut rcc.apb2);
         button.enable_interrupt(&mut cx.device.EXTI);
         button.trigger_on_edge(&mut cx.device.EXTI, Edge::Falling);
-        // Set up Timer
-        let mut timer = Timer::tim7(cx.device.TIM7, 60.hz(), clocks, &mut rcc.apb1r1);
+
+        // ================================================================================
+        // Set up Timer interrupt
+        let mut timer = Timer::tim7(cx.device.TIM7, 4.khz(), clocks, &mut rcc.apb1r1);
         timer.listen(Event::TimeOut);
 
+        // ================================================================================
         // set up OLED i2c
         let mut gpiob = cx.device.GPIOB.split(&mut rcc.ahb2);
 
@@ -130,11 +159,6 @@ const APP: () = {
             &mut rcc.apb1r1,
         );
 
-        // let mut readbuf = [0u8; 1];
-        // i2c.write_read(0x38u8, &[0xafu8], &mut readbuf[..1]);
-
-        // loop {}
-
         let interface = I2CDIBuilder::new().with_i2c_addr(0x3d).init(i2c);
         let mut disp: GraphicsMode<_, _> = Builder::new()
             // .with_size(DisplaySize::Display128x64NoOffset)
@@ -148,6 +172,32 @@ const APP: () = {
         cx.schedule
             .refresh_display(cx.start + REFRESH_DISPLAY_PERIOD.cycles())
             .unwrap();
+
+        // ================================================================================
+        // setup smart-led strip
+        let (sck, miso, mosi) = {
+            (
+                gpioa.pa5.into_af5(&mut gpioa.moder, &mut gpioa.afrl),
+                gpioa.pa6.into_af5(&mut gpioa.moder, &mut gpioa.afrl),
+                gpioa.pa7.into_af5(&mut gpioa.moder, &mut gpioa.afrl),
+            )
+        };
+
+        // Configure SPI with 3Mhz rate
+        let spi = Spi::spi1(
+            cx.device.SPI1,
+            (sck, miso, mosi),
+            ws2812::MODE,
+            3_000_000.hz(),
+            clocks,
+            &mut rcc.apb2,
+        );
+        let led_strip_dev = Ws2812::new(spi);
+
+        cx.schedule
+            .refresh_led_strip(cx.start + REFRESH_LED_STRIP_PERIOD.cycles())
+            .unwrap();
+
         // Initialization of late resources
         init::LateResources {
             led,
@@ -160,6 +210,18 @@ const APP: () = {
             is_on2: false,
             delta: 1,
             disp,
+            led_strip_dev,
+            rainbow: [
+                Rainbow::step_phase(1, 112),
+                Rainbow::step_phase(1, 96),
+                Rainbow::step_phase(1, 80),
+                Rainbow::step_phase(1, 64),
+                Rainbow::step_phase(1, 48),
+                Rainbow::step_phase(1, 32),
+                Rainbow::step_phase(1, 16),
+                Rainbow::step_phase(1, 0),
+            ],
+            //led_strip_data: [rtic_stm32::color::BLACK; 8],
         }
     }
 
@@ -174,16 +236,16 @@ const APP: () = {
         //     *cx.resources.is_on = false;
         // }
         cx.resources.timer;
-        if *cx.resources.cur >= 256 {
+        while *cx.resources.cur > *cx.resources.max {
             // *cx.resources.delta = -1;
-            *cx.resources.cur = 255;
+            *cx.resources.cur -= *cx.resources.max;
         }
-        if *cx.resources.cur <= 0 {
+        while *cx.resources.cur < 0 {
             // *cx.resources.delta = 1;
-            *cx.resources.cur = 0;
+            *cx.resources.cur += *cx.resources.max;
         }
-        let duty = GAMMA8[*cx.resources.cur as usize] as i32 * *cx.resources.max / 255;
-
+        //let duty = GAMMA8[*cx.resources.cur as usize] as i32 * *cx.resources.max / 255;
+        let duty = *cx.resources.cur;
         cx.resources.pwm.set_duty(duty as u32);
         // cx.resources.pwm.set_duty(*cx.resources.timer);
         // cx.resources.pwm.set_duty(*cx.resources.max);
@@ -257,8 +319,23 @@ const APP: () = {
             .refresh_display(cx.scheduled + REFRESH_DISPLAY_PERIOD.cycles())
             .unwrap();
     }
+    #[task(schedule=[refresh_led_strip], resources = [led_strip_dev, rainbow], priority = 3)]
+    fn refresh_led_strip(cx: refresh_led_strip::Context) {
+        cx.resources
+            .led_strip_dev
+            .write(smart_leds::brightness(
+                cx.resources.rainbow.iter_mut().map(|r| r.next().unwrap()),
+                32,
+            ))
+            .unwrap();
+
+        cx.schedule
+            .refresh_led_strip(cx.scheduled + REFRESH_LED_STRIP_PERIOD.cycles())
+            .unwrap();
+    }
 
     extern "C" {
         fn COMP();
+        fn SDMMC1();
     }
 };
