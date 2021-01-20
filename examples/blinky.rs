@@ -93,6 +93,12 @@ const APP: () = {
         let mut rcc = cx.device.RCC.constrain();
         let mut flash = cx.device.FLASH.constrain();
         let mut pwr = cx.device.PWR.constrain(&mut rcc.apb1r1);
+        let mut cp = cx.core;
+        
+        // software tasks won't work without this:
+        cp.DCB.enable_trace();
+        cp.DWT.enable_cycle_counter();
+        
         let clocks = rcc
             .cfgr
             .sysclk(64.mhz())
@@ -167,7 +173,7 @@ const APP: () = {
         disp.init().unwrap();
         disp.flush().unwrap();
 
-        disp.write("hello world!", None);
+        disp.write("hello world xxx!", None);
         disp.flush().unwrap();
         cx.schedule
             .refresh_display(cx.start + REFRESH_DISPLAY_PERIOD.cycles())
