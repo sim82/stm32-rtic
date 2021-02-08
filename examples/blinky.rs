@@ -94,11 +94,11 @@ const APP: () = {
         let mut flash = cx.device.FLASH.constrain();
         let mut pwr = cx.device.PWR.constrain(&mut rcc.apb1r1);
         let mut cp = cx.core;
-        
+
         // software tasks won't work without this:
         cp.DCB.enable_trace();
         cp.DWT.enable_cycle_counter();
-        
+
         let clocks = rcc
             .cfgr
             .sysclk(64.mhz())
