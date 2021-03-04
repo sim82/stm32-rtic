@@ -17,13 +17,14 @@ use hal::{
     },
     i2c::I2c,
     prelude::*,
+    rcc::{PllConfig, PllDivider},
     spi::Spi,
     stm32,
     timer::{Event, Timer},
 };
 use hal::{
     gpio::PC13,
-    stm32l4::stm32l4x6::{interrupt, Interrupt, NVIC},
+    stm32l4::stm32l4x2::{interrupt, Interrupt, NVIC},
 };
 use heapless::consts::*;
 use rtic::cyccnt::U32Ext;
@@ -50,6 +51,14 @@ const APP: () = {
 
     #[init(schedule = [refresh_display])]
     fn init(mut cx: init::Context) -> init::LateResources {
+        cx.device.RCC.cr.write(|w| w.pllsai1on().clear_bit());
+        while cx.device.RCC.cr.read().pllsai1rdy().bit_is_set() {}
+        cx.device
+            .RCC
+            .pllsai1cfgr
+            .write(|w| w.pllsai1pen().set_bit());
+        cx.device.RCC.cr.write(|w| w.pllsai1on().set_bit());
+
         cx.device.RCC.apb2enr.write(|w| w.sai1en().set_bit());
         // 2. reset it
         cx.device.RCC.apb2rstr.write(|w| w.sai1rst().set_bit());
@@ -66,9 +75,9 @@ const APP: () = {
 
         let clocks = rcc
             .cfgr
-            // .sysclk(64.mhz())
-            // .pclk1(16.mhz())
-            // .pclk2(64.mhz())
+            .sysclk(64.mhz())
+            .pclk1(16.mhz())
+            .pclk2(64.mhz())
             .freeze(&mut flash.acr, &mut pwr);
 
         // ================================================================================

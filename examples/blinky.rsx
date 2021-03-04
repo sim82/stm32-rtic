@@ -25,7 +25,7 @@ use hal::{
 };
 use hal::{
     gpio::PC13,
-    stm32l4::stm32l4x6::{interrupt, Interrupt, NVIC},
+    stm32l4::stm32l4x2::{interrupt, Interrupt, NVIC},
 };
 use heapless::consts::*;
 use rtic::cyccnt::U32Ext;
